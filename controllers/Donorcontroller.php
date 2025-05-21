@@ -5,6 +5,8 @@ require_once 'strategypattern/IPaymentMethod.php';
 require_once 'strategypattern/Ewallet.php';
 require_once 'strategypattern/BankCard.php';
 require_once 'strategypattern/OnlinePayment.php';
+require_once 'proxypattern/BankGatewayProxy.php';
+require_once 'proxypattern/UserContext.php';
 
 class DonorController {
     private $donorModel;
@@ -67,22 +69,23 @@ class DonorController {
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             try {
                 $donorId = $this->getLoggedInDonorId();
-        
-                // Verify the donor exists
-                $query = "SELECT COUNT(*) AS count FROM Donor WHERE donor_id = :donor_id";
-                $result = $this->db->query($query, [':donor_id' => $donorId]);
+    
+                $result = $this->db->query(
+                    "SELECT COUNT(*) AS count FROM Donor WHERE donor_id = :donor_id",
+                    [':donor_id' => $donorId]
+                );
                 if ($result[0]['count'] == 0) {
                     throw new Exception("Error: Donor does not exist. Please contact the administrator.");
                 }
-        
-                $type = $_POST['type']; // "money" or "blood"
+    
+                $type = $_POST['type']; 
                 $amount = $_POST['amount'] ?? null;
-                $eventId = $_POST['event_id'] ?? null; // Optional event ID
+                $eventId = $_POST['event_id'] ?? null;
                 $date = date('Y-m-d H:i:s');
-        
-                // Handle money donations with Strategy Pattern
+    
+                //  Payment Method (only for money)
                 if ($type === 'money') {
-                    $paymentType = $_POST['payment_method']; // Either 'ewallet' or 'bankcard'
+                    $paymentType = $_POST['payment_method'];
                     $paymentMethod = null;
     
                     if ($paymentType === 'ewallet') {
@@ -93,19 +96,25 @@ class DonorController {
                         $cardNumber = $_POST['card_number'];
                         $cvv = $_POST['cvv'];
                         $expiryDate = $_POST['expiry_date'];
-                        $paymentMethod = new BankCard($cardNumber, $cvv, $expiryDate);
+    
+                        // Protective Proxy
+                        $context = new UserContext($_SESSION['role'] ?? 'Guest');
+                        $proxy = new BankGatewayProxy($context);
+    
+                        if (!$proxy->validatePayment((float)$amount, $cardNumber, $expiryDate, $cvv)) {
+                            throw new Exception("Bank card validation failed. Payment was rejected or rate-limited.");
+                        }
+    
+                        echo "Bank card payment validated successfully.";
                     } else {
-                        throw new Exception("Invalid payment method selected.");
+                        throw new Exception("Invalid payment method.");
                     }
     
-                    // Process the payment
-                    if (!$paymentMethod->processPayment((float)$amount)) {
+                    if ($paymentType !== 'bankcard' && !$paymentMethod->processPayment((float)$amount)) {
                         throw new Exception("Payment failed. Please try again.");
                     }
-                    echo "Payment processed successfully.";
                 }
-        
-                // Insert the donation record
+    
                 $query = "INSERT INTO Donation (donor_id, event_id, type, amount, date, method) 
                           VALUES (:donor_id, :event_id, :type, :amount, :date, :method)";
                 $params = [
@@ -114,41 +123,32 @@ class DonorController {
                     ':type' => (string)$type,
                     ':amount' => $amount ? (float)$amount : null,
                     ':date' => (string)$date,
-                    ':method'    => $_POST['payment_method'], // e.g. "ewallet" or "bankcard"
+                    ':method' => $_POST['payment_method'],
                 ];
-        
+    
                 $result = $this->db->execute($query, $params);
-        
-                if ($result) {
-                    // Register the donor as an observer for the event if `event_id` is provided
-                    if ($eventId) {
-                        $observerQuery = "INSERT IGNORE INTO Event_Observers (event_id, user_id) VALUES (:event_id, :user_id)";
-                        $this->db->execute($observerQuery, [':event_id' => $eventId, ':user_id' => $_SESSION['user_id']]);
-        
-                        // Add notification to the inbox table
-                        $notificationQuery = "INSERT INTO Inbox (user_id, message, event_id) 
-                                              VALUES (:user_id, :message, :event_id)";
-                        $notificationParams = [
-                            ':user_id' => $_SESSION['user_id'],
-                            ':message' => "Thank you for your contribution to event ID $eventId.",
-                            ':event_id' => $eventId,
-                        ];
-                        $this->db->execute($notificationQuery, $notificationParams);
-                    }
-        
-                    // Redirect to view donations
-                    header('Location: index.php?controller=donor&action=viewDonations');
-                    exit;
-                } else {
-                    throw new Exception("Error adding donation. Please try again.");
+    
+                if ($result && $eventId) {
+                    $observerQuery = "INSERT IGNORE INTO Event_Observers (event_id, user_id) VALUES (:event_id, :user_id)";
+                    $this->db->execute($observerQuery, [':event_id' => $eventId, ':user_id' => $_SESSION['user_id']]);
+    
+                    $notificationQuery = "INSERT INTO Inbox (user_id, message, event_id) 
+                                          VALUES (:user_id, :message, :event_id)";
+                    $notificationParams = [
+                        ':user_id' => $_SESSION['user_id'],
+                        ':message' => "Thank you for your contribution to event ID $eventId.",
+                        ':event_id' => $eventId,
+                    ];
+                    $this->db->execute($notificationQuery, $notificationParams);
                 }
+    
+                header('Location: index.php?controller=donor&action=viewDonations');
+                exit;
             } catch (Exception $e) {
-                // Display error message
                 echo "<p style='color: red;'>Error: " . htmlspecialchars($e->getMessage()) . "</p>";
             }
         } else {
-            // Load the donation form view
-            $eventId = $_GET['eventId'] ?? null; // Passed from "Contribute" button
+            $eventId = $_GET['eventId'] ?? null;
             include 'views/donor/add_donation.php';
         }
     }
@@ -211,10 +211,6 @@ class DonorController {
     }
     
     
-    
-    
-    
-
     public function viewInbox() {
         $userId = $_SESSION['user_id']; // Get the logged-in user ID
     
