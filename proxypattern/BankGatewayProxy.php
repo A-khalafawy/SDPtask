@@ -13,12 +13,12 @@ class BankGatewayProxy implements IBankGateway {
     }
 
     public function validatePayment(float $amount, string $cardNumber, string $expiryDate, string $cvv): bool {
-        // Access control (Protective Proxy)
+        // Protective Proxy
         if (!$this->userContext->hasPermission('PAYMENT')) {
             throw new Exception("Access Denied: User role '{$this->userContext->getRole()}' is not allowed to make payments.");
         }
 
-        // Lazy-load RealBankGateway (Virtual Proxy)
+        // Virtual Proxy
         if ($this->realBankGateway === null) {
             $this->realBankGateway = new RealBankGateway();
         }
